@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { supabase } from './supabase';
 
 const THEMES = {
   google:  { name:"구글 라이트", emoji:"🔵", B:"#5080c8", R:"#c85040", Y:"#e8b800", G:"#3a9048", BG:"#f5f5f5", CA:"#ffffff", BD:"#e8e8ee", T1:"#1e1e22", T2:"#444455", T3:"#888899", T4:"#b0b0c0", SEG:"#e4e4e8", dark:false, yDark:true },
@@ -13,6 +14,31 @@ const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${Stri
 const getWeekKey = () => { const d = new Date(), j = new Date(d.getFullYear(),0,1); return `${d.getFullYear()}-W${String(Math.ceil(((d-j)/86400000+j.getDay()+1)/7)).padStart(2,"0")}`; };
 const save = (k,v) => { try { localStorage.setItem(k, typeof v==="string"?v:JSON.stringify(v)); } catch(_){} };
 const load = (k,fb) => { try { const v=localStorage.getItem(k); return v?JSON.parse(v):fb; } catch(_){return fb;} };
+
+const saveDB = async (userId, key, value) => {
+  if (!userId) return;
+  try {
+    const strValue = typeof value === "string" ? value : JSON.stringify(value);
+    await supabase.from("user_data").upsert(
+      { user_id: userId, data_key: key, data_value: strValue, updated_at: new Date().toISOString() },
+      { onConflict: "user_id,data_key" }
+    );
+  } catch (_) {}
+};
+
+const loadAllFromDB = async (userId) => {
+  if (!userId) return {};
+  try {
+    const { data } = await supabase.from("user_data").select("data_key,data_value").eq("user_id", userId);
+    if (!data) return {};
+    const result = {};
+    data.forEach(row => {
+      try { result[row.data_key] = JSON.parse(row.data_value); }
+      catch (_) { result[row.data_key] = row.data_value; }
+    });
+    return result;
+  } catch (_) { return {}; }
+};
 
 const DEF_HABITS = ["운동","노무사 공부","영어","뉴스 스크랩","감사일기","독서"];
 const DEF_TOP3 = ["노무사 공부","저축 이체","블로그 포스팅","영어 공부","투자 공부","업무 정리","운동"];
@@ -67,8 +93,18 @@ export default function App() {
   const [repLoading,setRepLoading] = useState(false);
   const [sec,setSec] = useState("theme");
   const [nh,setNh] = useState(""); const [nt,setNt] = useState(""); const [nw,setNw] = useState("");
+  const [user, setUser] = useState(null);
+  const [syncing, setSyncing] = useState(false);
 
   const td = todayStr(), wk = getWeekKey();
+
+  const sv = (k, v) => { save(k, v); if (user) saveDB(user.id, k, v); };
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => setUser(session?.user ?? null));
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, session) => setUser(session?.user ?? null));
+    return () => subscription.unsubscribe();
+  }, []);
 
   useEffect(() => {
     try {
@@ -90,18 +126,51 @@ export default function App() {
     setReady(true);
   },[]);
 
-  const toggleHabit = h => { const n={...habitDone,[h]:!habitDone[h]}; setHabitDone(n); save("gl_habit_"+td,n); };
-  const addNote = () => { if(!newNote.trim())return; const n=[...quickNotes,{id:Date.now(),date:td,text:newNote.trim()}]; setQuickNotes(n); save("gl_quicknotes",n); setNewNote(""); };
-  const saveTop3 = () => { if(top3Draft.length!==3)return; const n={weekKey:wk,items:top3Draft}; setWeeklyTop3(n); save("gl_weeklytop3",n); setTop3Sel(false); setTop3Draft([]); setTop1Sel(true); };
-  const saveTop1 = item => { const n={date:td,item,done:false}; setDailyTop1(n); save("gl_dailytop1",n); setTop1Sel(false); };
-  const doneTop1 = () => { const n={...dailyTop1,done:true}; setDailyTop1(n); save("gl_dailytop1",n); };
+  useEffect(() => {
+    if (!user || !ready) return;
+    const syncFromDB = async () => {
+      setSyncing(true);
+      const dbData = await loadAllFromDB(user.id);
+      if (Object.keys(dbData).length === 0) {
+        const keys = ["gl_profile","gl_habits","gl_top3items","gl_goals","gl_workinfo","gl_quicknotes","gl_weeklytop3","gl_dailytop1","gl_goalinputs","gl_theme","gl_habit_"+td,"gl_journal_"+td,"gl_coaching_"+td,"gl_review_"+wk];
+        for (const k of keys) { const v=localStorage.getItem(k); if(v) await saveDB(user.id, k, v); }
+      } else {
+        Object.entries(dbData).forEach(([k,v]) => save(k,v));
+        if(dbData["gl_profile"]){setProfile(dbData["gl_profile"]);setSetupDone(true);}
+        if(dbData["gl_habits"])setHabits(dbData["gl_habits"]);
+        if(dbData["gl_top3items"])setTop3Items(dbData["gl_top3items"]);
+        if(dbData["gl_goals"])setGoals(dbData["gl_goals"]);
+        if(dbData["gl_workinfo"])setWorkInfo(dbData["gl_workinfo"]);
+        if(dbData["gl_habit_"+td])setHabitDone(dbData["gl_habit_"+td]);
+        if(dbData["gl_journal_"+td])setJournal(dbData["gl_journal_"+td]);
+        if(dbData["gl_quicknotes"])setQuickNotes(dbData["gl_quicknotes"]);
+        if(dbData["gl_weeklytop3"])setWeeklyTop3(dbData["gl_weeklytop3"]);
+        if(dbData["gl_dailytop1"])setDailyTop1(dbData["gl_dailytop1"]);
+        if(dbData["gl_review_"+wk]){setReview(dbData["gl_review_"+wk]);setReviewSaved(true);}
+        if(dbData["gl_goalinputs"])setGoalInputs(dbData["gl_goalinputs"]);
+        if(dbData["gl_coaching_"+td])setCoaching(dbData["gl_coaching_"+td]);
+        if(dbData["gl_theme"])setThemeKey(dbData["gl_theme"]);
+      }
+      setSyncing(false);
+    };
+    syncFromDB();
+  }, [user, ready]);
+
+  const signInWithGoogle = () => supabase.auth.signInWithOAuth({ provider:'google', options:{ redirectTo: window.location.origin } });
+  const signOutUser = async () => { await supabase.auth.signOut(); setUser(null); };
+
+  const toggleHabit = h => { const n={...habitDone,[h]:!habitDone[h]}; setHabitDone(n); sv("gl_habit_"+td,n); };
+  const addNote = () => { if(!newNote.trim())return; const n=[...quickNotes,{id:Date.now(),date:td,text:newNote.trim()}]; setQuickNotes(n); sv("gl_quicknotes",n); setNewNote(""); };
+  const saveTop3 = () => { if(top3Draft.length!==3)return; const n={weekKey:wk,items:top3Draft}; setWeeklyTop3(n); sv("gl_weeklytop3",n); setTop3Sel(false); setTop3Draft([]); setTop1Sel(true); };
+  const saveTop1 = item => { const n={date:td,item,done:false}; setDailyTop1(n); sv("gl_dailytop1",n); setTop1Sel(false); };
+  const doneTop1 = () => { const n={...dailyTop1,done:true}; setDailyTop1(n); sv("gl_dailytop1",n); };
 
   const getCoaching = async () => {
     setCoachLoading(true);
     try {
       const hs = habits.map(h=>`${h}:${habitDone[h]?"완료":"미완료"}`).join(", ");
       const res = await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:300,messages:[{role:"user",content:`목표달성 코치입니다. 한국어 존댓말로 잘한점 1문장, 개선점 1문장, 내일조언 1문장. 이모티콘 금지. 간결하게.\n사용자:${profile.name}\n다짐:${journal.q3||"미작성"}\n습관:${hs}\nTOP1:${dailyTop1.item||"미설정"}-${dailyTop1.done?"완료":"미완료"}\nTOP3:${weeklyTop3.items?.join(", ")||"미설정"}`}]})});
-      const d=await res.json(); const c=d.content?.[0]?.text||"코칭 생성 실패"; setCoaching(c); save("gl_coaching_"+td,c);
+      const d=await res.json(); const c=d.content?.[0]?.text||"코칭 생성 실패"; setCoaching(c); sv("gl_coaching_"+td,c);
     }catch(_){setCoaching("코칭 생성 중 오류가 발생했어요.");}
     setCoachLoading(false);
   };
@@ -126,8 +195,8 @@ export default function App() {
   };
 
   const updateGoal = (id,val) => {
-    const ni={...goalInputs,[id]:val}; setGoalInputs(ni); save("gl_goalinputs",ni);
-    const ng=goals.map(g=>g.id===id?{...g,current:Number(val)||0}:g); setGoals(ng); save("gl_goals",ng);
+    const ni={...goalInputs,[id]:val}; setGoalInputs(ni); sv("gl_goalinputs",ni);
+    const ng=goals.map(g=>g.id===id?{...g,current:Number(val)||0}:g); setGoals(ng); sv("gl_goals",ng);
   };
 
   const hdCount = habits.filter(h=>habitDone[h]).length;
@@ -137,6 +206,7 @@ export default function App() {
   const LOGO = <>{["Goal"].join("")}<span style={{color:th.B}}>L</span><span style={{color:th.R}}>o</span><span style={{color:th.Y}}>g</span><span style={{color:th.G}}>.</span></>;
 
   if(!ready) return <div style={{background:th.BG,minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",color:th.T3,fontFamily:JB,fontSize:13}}>Loading...</div>;
+  if(syncing) return <div style={{background:th.BG,minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",color:th.T3,fontFamily:JB,fontSize:13}}>동기화 중...</div>;
 
   if(!setupDone) return (
     <div style={{background:th.BG,minHeight:"100vh",padding:20,fontFamily:NB}}>
@@ -145,6 +215,12 @@ export default function App() {
           <div style={{fontFamily:JB,fontSize:26,fontWeight:700,color:th.T1,marginBottom:4}}>{LOGO}</div>
           <div style={{fontSize:13,color:th.T3}}>시작 전에 이름을 입력해주세요</div>
         </div>
+        {!user&&<div style={{marginBottom:16}}>
+          <button onClick={signInWithGoogle} style={{width:"100%",padding:"12px 0",background:"#fff",border:"1.5px solid #e0e0e0",borderRadius:13,fontFamily:NB,fontSize:13,fontWeight:600,color:"#333",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+            <span style={{fontSize:16,fontWeight:700,color:"#4285F4"}}>G</span> Google로 로그인 (기기 간 동기화)
+          </button>
+          <div style={{fontSize:10,color:th.T3,textAlign:"center",marginTop:6,fontFamily:JB}}>로그인 없이도 사용 가능해요</div>
+        </div>}
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
           {[["이름","name","text","정나래"],["기상 시간","wakeTime","time",""],["퇴근 시간","workEndTime","time",""]].map(([label,key,type,ph])=>(
             <div key={key} style={{...K,padding:"12px 14px"}}>
@@ -152,7 +228,7 @@ export default function App() {
               <input type={type} style={{...I(th.B),borderRadius:8}} placeholder={ph} value={profile[key]} onChange={e=>setProfile({...profile,[key]:e.target.value})}/>
             </div>
           ))}
-          <button onClick={()=>{if(!profile.name)return;save("gl_profile",profile);setSetupDone(true);setTop3Sel(true);}} style={{...B(th.B,true,false)}}>시작하기 →</button>
+          <button onClick={()=>{if(!profile.name)return;sv("gl_profile",profile);setSetupDone(true);setTop3Sel(true);}} style={{...B(th.B,true,false)}}>시작하기 →</button>
         </div>
       </div>
     </div>
@@ -209,6 +285,10 @@ export default function App() {
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             <div style={{fontFamily:JB,fontSize:9,color:th.T3}}>{td}</div>
             <div style={C(th.G)}>{hdCount}/{habits.length}</div>
+            {user
+              ? <div style={{fontFamily:JB,fontSize:9,color:th.B,fontWeight:700}}>☁ 동기화됨</div>
+              : <button onClick={signInWithGoogle} style={{background:`${th.B}15`,border:`1px solid ${th.B}40`,borderRadius:8,padding:"3px 8px",fontFamily:JB,fontSize:9,color:th.B,cursor:"pointer",fontWeight:700}}>로그인</button>
+            }
           </div>
         </div>
 
@@ -240,7 +320,7 @@ export default function App() {
               </div>
               <div style={{padding:"10px 12px",display:"flex",flexDirection:"column",gap:7}}>
                 {[["q1","오늘 감사한 것 3가지..."],["q2","오늘 기분 좋게 만드는 것..."],["q3","오늘의 다짐 한 줄..."]].map(([k,ph])=>(
-                  <textarea key={k} rows={2} style={{...I(th.B),fontSize:11}} placeholder={ph} value={journal[k]} onChange={e=>setJournal({...journal,[k]:e.target.value})} onBlur={()=>save("gl_journal_"+td,journal)}/>
+                  <textarea key={k} rows={2} style={{...I(th.B),fontSize:11}} placeholder={ph} value={journal[k]} onChange={e=>setJournal({...journal,[k]:e.target.value})} onBlur={()=>sv("gl_journal_"+td,journal)}/>
                 ))}
               </div>
             </div>
@@ -278,7 +358,7 @@ export default function App() {
                 {quickNotes.filter(n=>n.date===td).map(n=>(
                   <div key={n.id} style={{fontSize:11,color:th.T2,padding:"5px 0",borderBottom:`0.5px solid ${th.BD}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                     <span>{n.text}</span>
-                    <button onClick={()=>{const nx=quickNotes.filter(q=>q.id!==n.id);setQuickNotes(nx);save("gl_quicknotes",nx);}} style={{background:"none",border:"none",color:th.T4,cursor:"pointer",fontSize:13}}>×</button>
+                    <button onClick={()=>{const nx=quickNotes.filter(q=>q.id!==n.id);setQuickNotes(nx);sv("gl_quicknotes",nx);}} style={{background:"none",border:"none",color:th.T4,cursor:"pointer",fontSize:13}}>×</button>
                   </div>
                 ))}
               </div>
@@ -347,7 +427,7 @@ export default function App() {
                     <textarea rows={3} style={{...I(th.G),fontSize:11}} placeholder={ph} value={review[k]} onChange={e=>setReview({...review,[k]:e.target.value})}/>
                   </div>
                 ))}
-                <button onClick={()=>{save("gl_review_"+wk,review);setReviewSaved(true);}} style={{...B(th.G,true,false)}}>{reviewSaved?"회고 저장됨 ✓":"회고 저장하기"}</button>
+                <button onClick={()=>{sv("gl_review_"+wk,review);setReviewSaved(true);}} style={{...B(th.G,true,false)}}>{reviewSaved?"회고 저장됨 ✓":"회고 저장하기"}</button>
               </div>
             </div>
             {wkNotes.length>0&&<div style={{...K,marginBottom:8}}>
@@ -409,14 +489,14 @@ export default function App() {
 
           {tab==="settings"&&<>
             <div style={{display:"flex",gap:6,marginBottom:10,overflowX:"auto",paddingBottom:2}}>
-              {[["theme","테마"],["profile","프로필"],["habits","습관"],["top3","TOP3"],["goals_s","목표"],["work","내 업무"]].map(([id,label])=>(
+              {[["theme","테마"],["profile","프로필"],["habits","습관"],["top3","TOP3"],["goals_s","목표"],["work","내 업무"],["sync","동기화"]].map(([id,label])=>(
                 <button key={id} onClick={()=>setSec(id)} style={{padding:"6px 12px",borderRadius:20,border:`1px solid ${sec===id?th.B:th.BD}`,background:sec===id?`${th.B}20`:th.CA,color:sec===id?th.B:th.T3,fontFamily:JB,fontSize:10,fontWeight:sec===id?700:400,cursor:"pointer",flexShrink:0}}>{label}</button>
               ))}
             </div>
 
             {sec==="theme"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
               {Object.entries(THEMES).map(([key,t])=>(
-                <button key={key} onClick={()=>{setThemeKey(key);save("gl_theme",key);}} style={{...K,padding:"14px 16px",display:"flex",alignItems:"center",gap:12,cursor:"pointer",border:themeKey===key?`1.5px solid ${th.B}`:`0.5px solid ${th.BD}`,background:th.CA,textAlign:"left",width:"100%"}}>
+                <button key={key} onClick={()=>{setThemeKey(key);sv("gl_theme",key);}} style={{...K,padding:"14px 16px",display:"flex",alignItems:"center",gap:12,cursor:"pointer",border:themeKey===key?`1.5px solid ${th.B}`:`0.5px solid ${th.BD}`,background:th.CA,textAlign:"left",width:"100%"}}>
                   <span style={{fontSize:20}}>{t.emoji}</span>
                   <div style={{flex:1}}>
                     <div style={{fontSize:13,fontWeight:700,color:th.T1,marginBottom:4}}>{t.name}</div>
@@ -433,7 +513,7 @@ export default function App() {
               {[["이름","name","text","정나래"],["기상 시간","wakeTime","time",""],["퇴근 시간","workEndTime","time",""]].map(([label,key,type,ph])=>(
                 <div key={key} style={{marginBottom:10}}>
                   <div style={{fontFamily:JB,fontSize:9,color:th.T3,marginBottom:4,textTransform:"uppercase",letterSpacing:.5}}>{label}</div>
-                  <input type={type} style={{...I(th.B),borderRadius:8}} placeholder={ph} value={profile[key]} onChange={e=>{const n={...profile,[key]:e.target.value};setProfile(n);save("gl_profile",n);}}/>
+                  <input type={type} style={{...I(th.B),borderRadius:8}} placeholder={ph} value={profile[key]} onChange={e=>{const n={...profile,[key]:e.target.value};setProfile(n);sv("gl_profile",n);}}/>
                 </div>
               ))}
             </div>}
@@ -442,12 +522,12 @@ export default function App() {
               {habits.map((h,i)=>(
                 <div key={h} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"7px 0",borderBottom:i<habits.length-1?`0.5px solid ${th.BD}`:"none"}}>
                   <span style={{fontSize:12,color:th.T1}}>{h}</span>
-                  <button onClick={()=>{const n=habits.filter(x=>x!==h);setHabits(n);save("gl_habits",n);}} style={{background:"none",border:"none",color:th.R,cursor:"pointer",fontSize:14}}>×</button>
+                  <button onClick={()=>{const n=habits.filter(x=>x!==h);setHabits(n);sv("gl_habits",n);}} style={{background:"none",border:"none",color:th.R,cursor:"pointer",fontSize:14}}>×</button>
                 </div>
               ))}
               <div style={{display:"flex",gap:6,marginTop:10}}>
-                <input style={{...I(th.B),flex:1,fontSize:11}} placeholder="새 습관..." value={nh} onChange={e=>setNh(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&nh.trim()){const n=[...habits,nh.trim()];setHabits(n);save("gl_habits",n);setNh("");}}}/>
-                <button onClick={()=>{if(!nh.trim())return;const n=[...habits,nh.trim()];setHabits(n);save("gl_habits",n);setNh("");}} style={{background:th.B,color:"#fff",border:"none",borderRadius:9,padding:"0 14px",fontFamily:JB,cursor:"pointer"}}>+</button>
+                <input style={{...I(th.B),flex:1,fontSize:11}} placeholder="새 습관..." value={nh} onChange={e=>setNh(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&nh.trim()){const n=[...habits,nh.trim()];setHabits(n);sv("gl_habits",n);setNh("");}}}/>
+                <button onClick={()=>{if(!nh.trim())return;const n=[...habits,nh.trim()];setHabits(n);sv("gl_habits",n);setNh("");}} style={{background:th.B,color:"#fff",border:"none",borderRadius:9,padding:"0 14px",fontFamily:JB,cursor:"pointer"}}>+</button>
               </div>
             </div>}
 
@@ -455,12 +535,12 @@ export default function App() {
               {top3Items.map((item,i)=>(
                 <div key={item} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"7px 0",borderBottom:i<top3Items.length-1?`0.5px solid ${th.BD}`:"none"}}>
                   <span style={{fontSize:12,color:th.T1}}>{item}</span>
-                  <button onClick={()=>{const n=top3Items.filter(x=>x!==item);setTop3Items(n);save("gl_top3items",n);}} style={{background:"none",border:"none",color:th.R,cursor:"pointer",fontSize:14}}>×</button>
+                  <button onClick={()=>{const n=top3Items.filter(x=>x!==item);setTop3Items(n);sv("gl_top3items",n);}} style={{background:"none",border:"none",color:th.R,cursor:"pointer",fontSize:14}}>×</button>
                 </div>
               ))}
               <div style={{display:"flex",gap:6,marginTop:10}}>
-                <input style={{...I(th.Y),flex:1,fontSize:11}} placeholder="새 항목..." value={nt} onChange={e=>setNt(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&nt.trim()){const n=[...top3Items,nt.trim()];setTop3Items(n);save("gl_top3items",n);setNt("");}}}/>
-                <button onClick={()=>{if(!nt.trim())return;const n=[...top3Items,nt.trim()];setTop3Items(n);save("gl_top3items",n);setNt("");}} style={{background:th.Y,color:th.yDark?"#1a1a00":"#fff",border:"none",borderRadius:9,padding:"0 14px",fontFamily:JB,cursor:"pointer"}}>+</button>
+                <input style={{...I(th.Y),flex:1,fontSize:11}} placeholder="새 항목..." value={nt} onChange={e=>setNt(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&nt.trim()){const n=[...top3Items,nt.trim()];setTop3Items(n);sv("gl_top3items",n);setNt("");}}}/>
+                <button onClick={()=>{if(!nt.trim())return;const n=[...top3Items,nt.trim()];setTop3Items(n);sv("gl_top3items",n);setNt("");}} style={{background:th.Y,color:th.yDark?"#1a1a00":"#fff",border:"none",borderRadius:9,padding:"0 14px",fontFamily:JB,cursor:"pointer"}}>+</button>
               </div>
             </div>}
 
@@ -468,7 +548,7 @@ export default function App() {
               {goals.map((g,i)=>(
                 <div key={g.id} style={{marginBottom:i<goals.length-1?12:0}}>
                   <div style={{fontFamily:JB,fontSize:9,color:th.T3,marginBottom:4,textTransform:"uppercase",letterSpacing:.5}}>{g.name} 목표 ({g.unit})</div>
-                  <input type="number" style={{...I(th.G),borderRadius:8,fontSize:11}} value={g.target} onChange={e=>{const n=goals.map(x=>x.id===g.id?{...x,target:Number(e.target.value)}:x);setGoals(n);save("gl_goals",n);}}/>
+                  <input type="number" style={{...I(th.G),borderRadius:8,fontSize:11}} value={g.target} onChange={e=>{const n=goals.map(x=>x.id===g.id?{...x,target:Number(e.target.value)}:x);setGoals(n);sv("gl_goals",n);}}/>
                 </div>
               ))}
             </div>}
@@ -476,19 +556,39 @@ export default function App() {
             {sec==="work"&&<div style={{...K,padding:"14px"}}>
               <div style={{marginBottom:12}}>
                 <div style={{fontFamily:JB,fontSize:9,color:th.T3,marginBottom:4,textTransform:"uppercase",letterSpacing:.5}}>직무</div>
-                <input style={{...I(th.R),borderRadius:8,fontSize:11}} value={workInfo.jobTitle} onChange={e=>{const n={...workInfo,jobTitle:e.target.value};setWorkInfo(n);save("gl_workinfo",n);}}/>
+                <input style={{...I(th.R),borderRadius:8,fontSize:11}} value={workInfo.jobTitle} onChange={e=>{const n={...workInfo,jobTitle:e.target.value};setWorkInfo(n);sv("gl_workinfo",n);}}/>
               </div>
               <div style={{fontFamily:JB,fontSize:9,color:th.T3,marginBottom:8,textTransform:"uppercase",letterSpacing:.5}}>주요 업무</div>
               {workInfo.tasks.map((task,i)=>(
                 <div key={task} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"7px 0",borderBottom:i<workInfo.tasks.length-1?`0.5px solid ${th.BD}`:"none"}}>
                   <span style={{fontSize:12,color:th.T1}}>{task}</span>
-                  <button onClick={()=>{const n={...workInfo,tasks:workInfo.tasks.filter(t=>t!==task)};setWorkInfo(n);save("gl_workinfo",n);}} style={{background:"none",border:"none",color:th.R,cursor:"pointer",fontSize:14}}>×</button>
+                  <button onClick={()=>{const n={...workInfo,tasks:workInfo.tasks.filter(t=>t!==task)};setWorkInfo(n);sv("gl_workinfo",n);}} style={{background:"none",border:"none",color:th.R,cursor:"pointer",fontSize:14}}>×</button>
                 </div>
               ))}
               <div style={{display:"flex",gap:6,marginTop:10}}>
-                <input style={{...I(th.R),flex:1,fontSize:11}} placeholder="업무 추가..." value={nw} onChange={e=>setNw(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&nw.trim()){const n={...workInfo,tasks:[...workInfo.tasks,nw.trim()]};setWorkInfo(n);save("gl_workinfo",n);setNw("");}}}/>
-                <button onClick={()=>{if(!nw.trim())return;const n={...workInfo,tasks:[...workInfo.tasks,nw.trim()]};setWorkInfo(n);save("gl_workinfo",n);setNw("");}} style={{background:th.R,color:"#fff",border:"none",borderRadius:9,padding:"0 14px",fontFamily:JB,cursor:"pointer"}}>+</button>
+                <input style={{...I(th.R),flex:1,fontSize:11}} placeholder="업무 추가..." value={nw} onChange={e=>setNw(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&nw.trim()){const n={...workInfo,tasks:[...workInfo.tasks,nw.trim()]};setWorkInfo(n);sv("gl_workinfo",n);setNw("");}}}/>
+                <button onClick={()=>{if(!nw.trim())return;const n={...workInfo,tasks:[...workInfo.tasks,nw.trim()]};setWorkInfo(n);sv("gl_workinfo",n);setNw("");}} style={{background:th.R,color:"#fff",border:"none",borderRadius:9,padding:"0 14px",fontFamily:JB,cursor:"pointer"}}>+</button>
               </div>
+            </div>}
+
+            {sec==="sync"&&<div style={{...K,padding:"14px"}}>
+              <div style={{fontFamily:JB,fontSize:9,color:th.T3,marginBottom:12,textTransform:"uppercase",letterSpacing:.5}}>기기 간 동기화</div>
+              {user ? (
+                <div>
+                  <div style={{background:`${th.G}15`,borderRadius:10,padding:"10px 12px",marginBottom:12}}>
+                    <div style={{fontSize:12,color:th.G,fontWeight:700,marginBottom:4}}>☁ 동기화 활성화됨</div>
+                    <div style={{fontSize:11,color:th.T2}}>{user.email}</div>
+                  </div>
+                  <button onClick={signOutUser} style={{...B(th.R,true,false)}}>로그아웃</button>
+                </div>
+              ) : (
+                <div>
+                  <div style={{fontSize:12,color:th.T2,marginBottom:12,lineHeight:1.7}}>Google 계정으로 로그인하면 여러 기기에서 데이터가 자동으로 동기화됩니다.</div>
+                  <button onClick={signInWithGoogle} style={{width:"100%",padding:"12px 0",background:"#fff",border:"1.5px solid #e0e0e0",borderRadius:13,fontFamily:NB,fontSize:13,fontWeight:600,color:"#333",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+                    <span style={{fontSize:16,fontWeight:700,color:"#4285F4"}}>G</span> Google로 로그인
+                  </button>
+                </div>
+              )}
             </div>}
           </>}
 
@@ -497,7 +597,7 @@ export default function App() {
         <div style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:520,background:tabC[tab],padding:"4px 14px",display:"flex",gap:14,fontFamily:JB,fontSize:9,fontWeight:700,color:sbTxt,zIndex:20}}>
           <span>⎇ main</span>
           <span>habits {hdCount}/{habits.length}</span>
-          <span style={{marginLeft:"auto"}}>{profile.name||"GoalLog"} · {th.name}</span>
+          <span style={{marginLeft:"auto"}}>{user?"☁ ":""}{profile.name||"GoalLog"} · {th.name}</span>
         </div>
 
       </div>
