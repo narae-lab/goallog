@@ -14,6 +14,7 @@ const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${Stri
 const getWeekKey = () => { const d = new Date(), j = new Date(d.getFullYear(),0,1); return `${d.getFullYear()}-W${String(Math.ceil(((d-j)/86400000+j.getDay()+1)/7)).padStart(2,"0")}`; };
 const save = (k,v) => { try { localStorage.setItem(k, typeof v==="string"?v:JSON.stringify(v)); } catch(_){} };
 const load = (k,fb) => { try { const v=localStorage.getItem(k); return v?JSON.parse(v):fb; } catch(_){return fb;} };
+const cleanMD = (t) => t.replace(/#{1,6}\s*/g,"").replace(/\*\*(.+?)\*\*/g,"$1").replace(/\*(.+?)\*/g,"$1").replace(/`(.+?)`/g,"$1").trim();
 
 const saveDB = async (userId, key, value) => {
   if (!userId) return;
@@ -90,15 +91,22 @@ export default function App() {
   const [repFrame,setRepFrame] = useState("PREP");
   const [repAns,setRepAns] = useState({});
   const [repFB,setRepFB] = useState("");
+  const [repEx,setRepEx] = useState("");
   const [repLoading,setRepLoading] = useState(false);
   const [sec,setSec] = useState("theme");
   const [nh,setNh] = useState(""); const [nt,setNt] = useState(""); const [nw,setNw] = useState("");
   const [user, setUser] = useState(null);
   const [syncing, setSyncing] = useState(false);
+  const [isDesktop, setIsDesktop] = useState(() => window.innerWidth >= 769);
 
   const td = todayStr(), wk = getWeekKey();
-
   const sv = (k, v) => { save(k, v); if (user) saveDB(user.id, k, v); };
+
+  useEffect(() => {
+    const check = () => setIsDesktop(window.innerWidth >= 769);
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => setUser(session?.user ?? null));
@@ -169,17 +177,17 @@ export default function App() {
     setCoachLoading(true);
     try {
       const hs = habits.map(h=>`${h}:${habitDone[h]?"완료":"미완료"}`).join(", ");
-      const res = await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:300,messages:[{role:"user",content:`목표달성 코치입니다. 한국어 존댓말로 잘한점 1문장, 개선점 1문장, 내일조언 1문장. 이모티콘 금지. 간결하게.\n사용자:${profile.name}\n다짐:${journal.q3||"미작성"}\n습관:${hs}\nTOP1:${dailyTop1.item||"미설정"}-${dailyTop1.done?"완료":"미완료"}\nTOP3:${weeklyTop3.items?.join(", ")||"미설정"}`}]})});
-      const d=await res.json(); const c=d.content?.[0]?.text||"코칭 생성 실패"; setCoaching(c); sv("gl_coaching_"+td,c);
+      const res = await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:300,messages:[{role:"user",content:`목표달성 코치입니다. 한국어 존댓말로 잘한점 1문장, 개선점 1문장, 내일조언 1문장. 마크다운 기호 절대 사용하지 마세요. 이모티콘 금지. 간결하게.\n사용자:${profile.name}\n다짐:${journal.q3||"미작성"}\n습관:${hs}\nTOP1:${dailyTop1.item||"미설정"}-${dailyTop1.done?"완료":"미완료"}\nTOP3:${weeklyTop3.items?.join(", ")||"미설정"}`}]})});
+      const d=await res.json(); const c=cleanMD(d.content?.[0]?.text||"코칭 생성 실패"); setCoaching(c); sv("gl_coaching_"+td,c);
     }catch(_){setCoaching("코칭 생성 중 오류가 발생했어요.");}
     setCoachLoading(false);
   };
 
   const genSit = async () => {
-    setRepLoading(true); setRepFB(""); setRepAns({});
+    setRepLoading(true); setRepFB(""); setRepEx(""); setRepAns({});
     try {
-      const res=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:150,messages:[{role:"user",content:`HR 직무 전문가. 업무목록: ${workInfo.tasks.join(", ")} 중 하나로 ${FRAMES[repFrame].desc} 연습용 상황 1-2문장만 한국어로. 상황만 출력.`}]})});
-      const d=await res.json(); setRepSit(d.content?.[0]?.text||"상황 생성 실패");
+      const res=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:150,messages:[{role:"user",content:`HR 직무 전문가. 업무목록: ${workInfo.tasks.join(", ")} 중 하나로 ${FRAMES[repFrame].desc} 연습용 상황 1-2문장만 한국어로. 마크다운 기호 사용 금지. 상황만 출력.`}]})});
+      const d=await res.json(); setRepSit(cleanMD(d.content?.[0]?.text||"상황 생성 실패"));
     }catch(_){setRepSit("오류 발생");}
     setRepLoading(false);
   };
@@ -187,10 +195,29 @@ export default function App() {
   const getRepFB = async () => {
     setRepLoading(true);
     try {
-      const f=FRAMES[repFrame]; const ans=f.fields.map((fld,i)=>`${fld}: ${repAns[i]||"(미작성)"}`).join("\n");
-      const res=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:300,messages:[{role:"user",content:`커뮤니케이션 코치. ${f.name} 프레임 답변 피드백 2-3문장, 한국어 존댓말, 이모티콘 금지.\n상황:${repSit}\n답변:\n${ans}`}]})});
-      const d=await res.json(); setRepFB(d.content?.[0]?.text||"피드백 생성 실패");
-    }catch(_){setRepFB("오류 발생");}
+      const f=FRAMES[repFrame];
+      const ans=f.fields.map((fld,i)=>`${fld}: ${repAns[i]||"(미작성)"}`).join("\n");
+      const prompt=`커뮤니케이션 코치입니다. 마크다운 기호 절대 사용 금지. 한국어 존댓말. 이모티콘 금지.
+
+아래 JSON 형식으로만 응답하세요:
+{"feedback":"피드백 2-3문장","example":{"${f.fields[0]}":"예시","${f.fields[1]}":"예시","${f.fields[2]}":"예시"${f.fields[3]?`,"${f.fields[3]}":"예시"`:""}}}
+
+상황: ${repSit}
+프레임: ${f.name}
+답변:
+${ans}`;
+      const res=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:600,messages:[{role:"user",content:prompt}]})});
+      const d=await res.json();
+      const raw=d.content?.[0]?.text||"{}";
+      try {
+        const parsed=JSON.parse(raw.replace(/```json|```/g,"").trim());
+        setRepFB(parsed.feedback||"");
+        setRepEx(parsed.example||{});
+      } catch(_) {
+        setRepFB(cleanMD(raw));
+        setRepEx({});
+      }
+    }catch(_){setRepFB("오류 발생");setRepEx({});}
     setRepLoading(false);
   };
 
@@ -276,19 +303,64 @@ export default function App() {
     </div>
   );
 
+  const ReportTab = () => (
+    <>
+      <div style={{...K,marginBottom:8}}>
+        <div style={{padding:"9px 12px",borderBottom:`0.5px solid ${th.BD}`}}><span style={{fontFamily:JB,fontSize:11,fontWeight:700,color:th.T1}}>말하기 연습</span></div>
+        <div style={{padding:"10px 12px"}}>
+          <div style={{fontSize:10,color:th.T3,marginBottom:8,fontFamily:JB,textTransform:"uppercase",letterSpacing:.5}}>프레임 선택</div>
+          <div style={{display:"flex",gap:6,marginBottom:12}}>
+            {Object.entries(FRAMES).map(([key,f])=>(
+              <button key={key} onClick={()=>{setRepFrame(key);setRepSit(null);setRepAns({});setRepFB("");setRepEx("");}} style={{flex:1,padding:"8px 4px",background:repFrame===key?`${th.R}18`:th.BG,border:`1px solid ${repFrame===key?th.R:th.BD}`,borderRadius:9,cursor:"pointer",fontFamily:JB,fontSize:9,fontWeight:repFrame===key?700:400,color:repFrame===key?th.R:th.T3}}>
+                <div>{f.name}</div><div style={{fontSize:8,marginTop:2,color:th.T4}}>{f.desc}</div>
+              </button>
+            ))}
+          </div>
+          <button onClick={genSit} disabled={repLoading} style={{...B(th.R,true,false)}}>{repLoading?"생성 중...":"상황 카드 뽑기 →"}</button>
+        </div>
+      </div>
+      {repSit&&<div style={{...K,marginBottom:8}}>
+        <div style={{padding:"9px 12px",borderBottom:`0.5px solid ${th.BD}`,display:"flex",alignItems:"center",gap:8}}>
+          <span style={C(th.R)}>상황</span>
+          <span style={{fontFamily:JB,fontSize:10,color:th.T3}}>{FRAMES[repFrame].name}</span>
+        </div>
+        <div style={{padding:"10px 12px"}}>
+          <div style={{background:`${th.R}12`,borderRadius:9,padding:"10px 12px",fontSize:12,color:th.T1,lineHeight:1.7,marginBottom:12}}>{repSit}</div>
+          {FRAMES[repFrame].fields.map((field,i)=>(
+            <div key={i} style={{marginBottom:8}}>
+              <div style={{fontFamily:JB,fontSize:9,color:th.R,marginBottom:4,fontWeight:700}}>{field}</div>
+              <textarea rows={2} style={{...I(th.R),fontSize:11}} placeholder="답변을 입력하세요..." value={repAns[i]||""} onChange={e=>setRepAns({...repAns,[i]:e.target.value})}/>
+            </div>
+          ))}
+          <button onClick={getRepFB} disabled={repLoading} style={{...B(th.R,true,false)}}>{repLoading?"피드백 생성 중...":"AI 피드백 받기 →"}</button>
+        </div>
+      </div>}
+      {repFB&&<div style={{background:`${th.R}10`,border:`1px solid ${th.R}30`,borderRadius:13,padding:"12px 14px",marginBottom:8}}>
+        <div style={{fontFamily:JB,fontSize:9,color:th.R,fontWeight:700,marginBottom:6,textTransform:"uppercase",letterSpacing:1}}>AI Feedback</div>
+        <div style={{fontSize:12,color:th.T1,lineHeight:1.9}}>{repFB}</div>
+      </div>}
+      {repEx&&Object.keys(repEx).length>0&&<div style={{background:`${th.B}10`,border:`1px solid ${th.B}30`,borderRadius:13,padding:"12px 14px",marginBottom:8}}>
+        <div style={{fontFamily:JB,fontSize:9,color:th.B,fontWeight:700,marginBottom:10,textTransform:"uppercase",letterSpacing:1}}>모범 답변 예시</div>
+        {Object.entries(repEx).map(([field,val],i)=>(
+          <div key={i} style={{marginBottom:i<Object.keys(repEx).length-1?10:0}}>
+            <div style={{fontFamily:JB,fontSize:9,color:th.B,fontWeight:700,marginBottom:4}}>{field}</div>
+            <div style={{background:`${th.B}12`,borderRadius:8,padding:"8px 10px",fontSize:12,color:th.T1,lineHeight:1.7}}>{val}</div>
+          </div>
+        ))}
+      </div>}
+    </>
+  );
+
   return (
     <div style={{background:th.BG,minHeight:"100vh",fontFamily:NB}}>
       <div style={{maxWidth:520,margin:"0 auto"}}>
-
         <div style={{background:th.CA,borderBottom:`0.5px solid ${th.BD}`,padding:"10px 14px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:10}}>
           <div style={{fontFamily:JB,fontSize:17,fontWeight:700,color:th.T1,letterSpacing:-.5}}>{LOGO}</div>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             <div style={{fontFamily:JB,fontSize:9,color:th.T3}}>{td}</div>
             <div style={C(th.G)}>{hdCount}/{habits.length}</div>
-            {user
-              ? <div style={{fontFamily:JB,fontSize:9,color:th.B,fontWeight:700}}>☁ 동기화됨</div>
-              : <button onClick={signInWithGoogle} style={{background:`${th.B}15`,border:`1px solid ${th.B}40`,borderRadius:8,padding:"3px 8px",fontFamily:JB,fontSize:9,color:th.B,cursor:"pointer",fontWeight:700}}>로그인</button>
-            }
+            {user ? <div style={{fontFamily:JB,fontSize:9,color:th.B,fontWeight:700}}>☁ 동기화됨</div>
+              : <button onClick={signInWithGoogle} style={{background:`${th.B}15`,border:`1px solid ${th.B}40`,borderRadius:8,padding:"3px 8px",fontFamily:JB,fontSize:9,color:th.B,cursor:"pointer",fontWeight:700}}>로그인</button>}
           </div>
         </div>
 
@@ -299,19 +371,15 @@ export default function App() {
         </div>
 
         <div style={{padding:"4px 10px 80px"}}>
-
           {tab==="today"&&<>
             <div style={{background:dailyTop1.done?`${th.G}18`:`${th.Y}18`,border:`1px solid ${dailyTop1.done?th.G:th.Y}44`,borderRadius:13,padding:"12px 14px",marginBottom:8,display:"flex",alignItems:"center",gap:10}}>
               <div style={{flex:1}}>
                 <div style={{fontFamily:JB,fontSize:9,color:dailyTop1.done?th.G:th.Y,fontWeight:700,textTransform:"uppercase",letterSpacing:1,marginBottom:3}}>Today's TOP 1</div>
                 <div style={{fontSize:14,fontWeight:700,color:th.T1}}>{dailyTop1.item}</div>
               </div>
-              {!dailyTop1.done
-                ?<button onClick={doneTop1} style={{background:th.Y,color:th.yDark?"#1a1a00":"#fff",border:"none",borderRadius:10,padding:"6px 14px",fontFamily:JB,fontSize:10,fontWeight:700,cursor:"pointer"}}>완료 ✓</button>
-                :<div style={{fontFamily:JB,fontSize:11,color:th.G,fontWeight:700}}>완료 ✓</div>
-              }
+              {!dailyTop1.done ? <button onClick={doneTop1} style={{background:th.Y,color:th.yDark?"#1a1a00":"#fff",border:"none",borderRadius:10,padding:"6px 14px",fontFamily:JB,fontSize:10,fontWeight:700,cursor:"pointer"}}>완료 ✓</button>
+                : <div style={{fontFamily:JB,fontSize:11,color:th.G,fontWeight:700}}>완료 ✓</div>}
             </div>
-
             <div style={{...K,marginBottom:8}}>
               <div style={{padding:"9px 12px",display:"flex",alignItems:"center",gap:8,borderBottom:`0.5px solid ${th.BD}`}}>
                 <div style={{width:26,height:26,borderRadius:8,background:`${th.B}20`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13}}>📝</div>
@@ -324,7 +392,6 @@ export default function App() {
                 ))}
               </div>
             </div>
-
             <div style={{...K,marginBottom:8}}>
               <div style={{padding:"9px 12px",display:"flex",alignItems:"center",gap:8,borderBottom:`0.5px solid ${th.BD}`}}>
                 <div style={{width:26,height:26,borderRadius:8,background:`${th.G}20`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13}}>✅</div>
@@ -343,7 +410,6 @@ export default function App() {
                 ))}
               </div>
             </div>
-
             <div style={{...K,marginBottom:8}}>
               <div style={{padding:"9px 12px",display:"flex",alignItems:"center",gap:8,borderBottom:`0.5px solid ${th.BD}`}}>
                 <div style={{width:26,height:26,borderRadius:8,background:`${th.R}20`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13}}>📌</div>
@@ -363,7 +429,6 @@ export default function App() {
                 ))}
               </div>
             </div>
-
             <button onClick={getCoaching} disabled={coachLoading} style={{...B(th.B,true,false),marginBottom:8}}>{coachLoading?"코칭 생성 중...":"오늘의 AI 코칭 받기 →"}</button>
             {coaching&&<div style={{background:`${th.B}12`,border:`1px solid ${th.B}30`,borderRadius:13,padding:"12px 14px",marginBottom:8}}>
               <div style={{fontFamily:JB,fontSize:9,color:th.B,fontWeight:700,marginBottom:6,textTransform:"uppercase",letterSpacing:1}}>AI Coaching</div>
@@ -450,42 +515,7 @@ export default function App() {
             </div>
           </>}
 
-          {tab==="report"&&<>
-            <div style={{...K,marginBottom:8}}>
-              <div style={{padding:"9px 12px",borderBottom:`0.5px solid ${th.BD}`}}><span style={{fontFamily:JB,fontSize:11,fontWeight:700,color:th.T1}}>말하기 연습</span></div>
-              <div style={{padding:"10px 12px"}}>
-                <div style={{fontSize:10,color:th.T3,marginBottom:8,fontFamily:JB,textTransform:"uppercase",letterSpacing:.5}}>프레임 선택</div>
-                <div style={{display:"flex",gap:6,marginBottom:12}}>
-                  {Object.entries(FRAMES).map(([key,f])=>(
-                    <button key={key} onClick={()=>{setRepFrame(key);setRepSit(null);setRepAns({});setRepFB("");}} style={{flex:1,padding:"8px 4px",background:repFrame===key?`${th.R}18`:th.BG,border:`1px solid ${repFrame===key?th.R:th.BD}`,borderRadius:9,cursor:"pointer",fontFamily:JB,fontSize:9,fontWeight:repFrame===key?700:400,color:repFrame===key?th.R:th.T3}}>
-                      <div>{f.name}</div><div style={{fontSize:8,marginTop:2,color:th.T4}}>{f.desc}</div>
-                    </button>
-                  ))}
-                </div>
-                <button onClick={genSit} disabled={repLoading} style={{...B(th.R,true,false)}}>{repLoading?"생성 중...":"상황 카드 뽑기 →"}</button>
-              </div>
-            </div>
-            {repSit&&<div style={{...K,marginBottom:8}}>
-              <div style={{padding:"9px 12px",borderBottom:`0.5px solid ${th.BD}`,display:"flex",alignItems:"center",gap:8}}>
-                <span style={C(th.R)}>상황</span>
-                <span style={{fontFamily:JB,fontSize:10,color:th.T3}}>{FRAMES[repFrame].name}</span>
-              </div>
-              <div style={{padding:"10px 12px"}}>
-                <div style={{background:`${th.R}12`,borderRadius:9,padding:"10px 12px",fontSize:12,color:th.T1,lineHeight:1.7,marginBottom:12}}>{repSit}</div>
-                {FRAMES[repFrame].fields.map((field,i)=>(
-                  <div key={i} style={{marginBottom:8}}>
-                    <div style={{fontFamily:JB,fontSize:9,color:th.R,marginBottom:4,fontWeight:700}}>{field}</div>
-                    <textarea rows={2} style={{...I(th.R),fontSize:11}} placeholder="답변을 입력하세요..." value={repAns[i]||""} onChange={e=>setRepAns({...repAns,[i]:e.target.value})}/>
-                  </div>
-                ))}
-                <button onClick={getRepFB} disabled={repLoading} style={{...B(th.R,true,false)}}>{repLoading?"피드백 생성 중...":"AI 피드백 받기 →"}</button>
-              </div>
-            </div>}
-            {repFB&&<div style={{background:`${th.R}10`,border:`1px solid ${th.R}30`,borderRadius:13,padding:"12px 14px",marginBottom:8}}>
-              <div style={{fontFamily:JB,fontSize:9,color:th.R,fontWeight:700,marginBottom:6,textTransform:"uppercase",letterSpacing:1}}>AI Feedback</div>
-              <div style={{fontSize:12,color:th.T1,lineHeight:1.9}}>{repFB}</div>
-            </div>}
-          </>}
+          {tab==="report"&&<ReportTab/>}
 
           {tab==="settings"&&<>
             <div style={{display:"flex",gap:6,marginBottom:10,overflowX:"auto",paddingBottom:2}}>
@@ -493,22 +523,18 @@ export default function App() {
                 <button key={id} onClick={()=>setSec(id)} style={{padding:"6px 12px",borderRadius:20,border:`1px solid ${sec===id?th.B:th.BD}`,background:sec===id?`${th.B}20`:th.CA,color:sec===id?th.B:th.T3,fontFamily:JB,fontSize:10,fontWeight:sec===id?700:400,cursor:"pointer",flexShrink:0}}>{label}</button>
               ))}
             </div>
-
             {sec==="theme"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
               {Object.entries(THEMES).map(([key,t])=>(
                 <button key={key} onClick={()=>{setThemeKey(key);sv("gl_theme",key);}} style={{...K,padding:"14px 16px",display:"flex",alignItems:"center",gap:12,cursor:"pointer",border:themeKey===key?`1.5px solid ${th.B}`:`0.5px solid ${th.BD}`,background:th.CA,textAlign:"left",width:"100%"}}>
                   <span style={{fontSize:20}}>{t.emoji}</span>
                   <div style={{flex:1}}>
                     <div style={{fontSize:13,fontWeight:700,color:th.T1,marginBottom:4}}>{t.name}</div>
-                    <div style={{display:"flex",gap:4}}>
-                      {[t.B,t.R,t.Y,t.G].map((c,i)=><div key={i} style={{width:14,height:14,borderRadius:"50%",background:c}}/>)}
-                    </div>
+                    <div style={{display:"flex",gap:4}}>{[t.B,t.R,t.Y,t.G].map((c,i)=><div key={i} style={{width:14,height:14,borderRadius:"50%",background:c}}/>)}</div>
                   </div>
                   {themeKey===key&&<span style={{fontFamily:JB,fontSize:10,color:th.B,fontWeight:700}}>현재 ✓</span>}
                 </button>
               ))}
             </div>}
-
             {sec==="profile"&&<div style={{...K,padding:"14px"}}>
               {[["이름","name","text","정나래"],["기상 시간","wakeTime","time",""],["퇴근 시간","workEndTime","time",""]].map(([label,key,type,ph])=>(
                 <div key={key} style={{marginBottom:10}}>
@@ -517,7 +543,6 @@ export default function App() {
                 </div>
               ))}
             </div>}
-
             {sec==="habits"&&<div style={{...K,padding:"14px"}}>
               {habits.map((h,i)=>(
                 <div key={h} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"7px 0",borderBottom:i<habits.length-1?`0.5px solid ${th.BD}`:"none"}}>
@@ -530,7 +555,6 @@ export default function App() {
                 <button onClick={()=>{if(!nh.trim())return;const n=[...habits,nh.trim()];setHabits(n);sv("gl_habits",n);setNh("");}} style={{background:th.B,color:"#fff",border:"none",borderRadius:9,padding:"0 14px",fontFamily:JB,cursor:"pointer"}}>+</button>
               </div>
             </div>}
-
             {sec==="top3"&&<div style={{...K,padding:"14px"}}>
               {top3Items.map((item,i)=>(
                 <div key={item} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"7px 0",borderBottom:i<top3Items.length-1?`0.5px solid ${th.BD}`:"none"}}>
@@ -543,7 +567,6 @@ export default function App() {
                 <button onClick={()=>{if(!nt.trim())return;const n=[...top3Items,nt.trim()];setTop3Items(n);sv("gl_top3items",n);setNt("");}} style={{background:th.Y,color:th.yDark?"#1a1a00":"#fff",border:"none",borderRadius:9,padding:"0 14px",fontFamily:JB,cursor:"pointer"}}>+</button>
               </div>
             </div>}
-
             {sec==="goals_s"&&<div style={{...K,padding:"14px"}}>
               {goals.map((g,i)=>(
                 <div key={g.id} style={{marginBottom:i<goals.length-1?12:0}}>
@@ -552,7 +575,6 @@ export default function App() {
                 </div>
               ))}
             </div>}
-
             {sec==="work"&&<div style={{...K,padding:"14px"}}>
               <div style={{marginBottom:12}}>
                 <div style={{fontFamily:JB,fontSize:9,color:th.T3,marginBottom:4,textTransform:"uppercase",letterSpacing:.5}}>직무</div>
@@ -570,7 +592,6 @@ export default function App() {
                 <button onClick={()=>{if(!nw.trim())return;const n={...workInfo,tasks:[...workInfo.tasks,nw.trim()]};setWorkInfo(n);sv("gl_workinfo",n);setNw("");}} style={{background:th.R,color:"#fff",border:"none",borderRadius:9,padding:"0 14px",fontFamily:JB,cursor:"pointer"}}>+</button>
               </div>
             </div>}
-
             {sec==="sync"&&<div style={{...K,padding:"14px"}}>
               <div style={{fontFamily:JB,fontSize:9,color:th.T3,marginBottom:12,textTransform:"uppercase",letterSpacing:.5}}>기기 간 동기화</div>
               {user ? (
@@ -591,7 +612,6 @@ export default function App() {
               )}
             </div>}
           </>}
-
         </div>
 
         <div style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:520,background:tabC[tab],padding:"4px 14px",display:"flex",gap:14,fontFamily:JB,fontSize:9,fontWeight:700,color:sbTxt,zIndex:20}}>
@@ -599,7 +619,6 @@ export default function App() {
           <span>habits {hdCount}/{habits.length}</span>
           <span style={{marginLeft:"auto"}}>{user?"☁ ":""}{profile.name||"GoalLog"} · {th.name}</span>
         </div>
-
       </div>
     </div>
   );
